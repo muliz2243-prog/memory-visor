@@ -1,0 +1,6 @@
+/target
+token
+token.txt
+*.log
+.DS_Store
+Thumbs.db
