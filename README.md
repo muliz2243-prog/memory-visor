@@ -1,8 +1,13 @@
 # Memory Visor
 
+![Tests](https://github.com/muliz2243-prog/memory-visor/actions/workflows/rust.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 A time-travel debugger for Rust memory: lexical scopes, ownership, borrows and
 `Drop` are recorded as events and replayed on an `egui` canvas with a movable
 cursor.
+
+![Memory Visor showing two live borrows inside a block](docs/screenshot.png)
 
 Run the desktop window with `cargo run --bin visor`; `cargo run` starts the CLI.
 See `DESIGN.md` for the architecture and `AGENTS.md` for the verification
@@ -36,3 +41,7 @@ Python, C++ or JavaScript) by abstracting the semantic engine behind an adapter
 trait (`LanguageSemantics`). That adapter would interpret language-specific
 memory events (for example garbage collection or reference counting) while
 reusing the same visual and playback engine.
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).

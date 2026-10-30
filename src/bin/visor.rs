@@ -1,7 +1,7 @@
 use eframe::egui;
 use memory_visor::edge::ui::app::sample_window;
 
-const TITLE: &str = "Visor de memoria";
+const TITLE: &str = "Memory Visor";
 
 fn main() -> eframe::Result {
     let app = match sample_window() {
