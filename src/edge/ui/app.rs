@@ -16,6 +16,7 @@ use crate::shell::format::truncate;
 use crate::shell::render::{RenderInput, content_size, draw_memory};
 use crate::shell::theme::Theme;
 use crate::stages::analyze::{Analysis, analyze_program};
+use crate::stages::execution::{ExecutionStep, execution_step};
 use crate::stages::layout::{LayoutConfig, MemoryLayout, layout_memory};
 use crate::stages::replay::{Timeline, build_timeline};
 
@@ -177,6 +178,11 @@ impl VisorApp {
         &self.layout
     }
 
+    /// Read-only view of the step the cursor is on. `None` past the trace.
+    pub fn active_step(&self) -> Option<ExecutionStep<'_>> {
+        execution_step(&self.events, &self.timeline, self.player.index)
+    }
+
     fn toggle_play(&mut self) {
         if self.playing() {
             self.player = self.player.paused();
@@ -273,12 +279,16 @@ impl VisorApp {
             Some(state) => state,
             None => return,
         };
+        let step = self.active_step();
         let input = RenderInput {
             state,
             layout: &self.layout,
             program: &self.program,
             theme: &self.theme,
             effects: self.current_effects(),
+            active_frame: step.as_ref().and_then(ExecutionStep::active_frame),
+            active_scope: step.as_ref().and_then(ExecutionStep::active_scope),
+            flow: step.as_ref().and_then(|step| step.flow.clone()),
         };
         let size = content_size(&self.layout);
         egui::ScrollArea::both()
@@ -641,5 +651,37 @@ mod tests {
         app.source = "fn main() {\n    let a: i32 = -2 * 3;\n}".to_string();
         app.update(UiMessage::Record);
         assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn the_active_box_follows_the_cursor() {
+        let mut app = app();
+        app.source = "fn main() {\n    let a: i32 = 1;\n}".to_string();
+        app.update(UiMessage::Record);
+        app.set_step(3);
+        let step = app.active_step().expect("step 3 exists");
+        assert_eq!(step.active_frame(), Some(crate::model::ids::FrameId(1)));
+        assert_eq!(step.line, Some(2));
+    }
+
+    #[test]
+    fn a_branch_exposes_its_flow_edge() {
+        let mut app = app();
+        app.source =
+            "fn main() {\n    let n: i32 = 3;\n    if n > 2 {\n        let big: i32 = 1;\n    }\n}"
+                .to_string();
+        app.update(UiMessage::Record);
+        let position = app
+            .events
+            .iter()
+            .position(|event| matches!(event, TraceEvent::ConditionalJump { .. }))
+            .expect("the trace records the jump")
+            + 1;
+        app.set_step(position);
+        let step = app.active_step().expect("the jump step exists");
+        let flow = step.flow.expect("the jump carries an edge");
+        assert_eq!(flow.outcome, crate::model::events::ConditionOutcome::True);
+        assert_eq!(flow.from_line, 3);
+        assert_eq!(flow.to_line, 4);
     }
 }

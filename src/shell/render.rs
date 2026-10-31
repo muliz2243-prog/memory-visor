@@ -4,13 +4,14 @@ use egui::{
 };
 
 use crate::model::events::BorrowKind;
-use crate::model::ids::{FrameId, ObjectId};
+use crate::model::ids::{FrameId, ObjectId, ScopeId};
 use crate::model::memory::{Location, MemoryState, ObjectState, Path};
 use crate::model::outcome::{Effect, Incident};
 use crate::model::program::ProgramTree;
 use crate::model::scope::ScopeKind;
 use crate::shell::format::{cell_label, format_value, function_name, truncate};
 use crate::shell::theme::{Palette, Theme};
+use crate::stages::execution::FlowEdge;
 use crate::stages::layout::{self, Connector, FrameBox, MemoryLayout, ObjectBox, SlotBox};
 
 const BOX_CORNER: CornerRadius = CornerRadius::same(4);
@@ -33,6 +34,12 @@ pub struct RenderInput<'a> {
     /// Effects of the step that produced `state`. Empty at step 0 and after a
     /// rejected event; the renderer marks their targets in amber.
     pub effects: &'a [Effect],
+    /// Frame the cursor is running. Its box gets the active outline.
+    pub active_frame: Option<FrameId>,
+    /// Innermost scope of the running frame, if the flow is inside a block.
+    pub active_scope: Option<ScopeId>,
+    /// Branch a conditional jump took, drawn next to the active frame.
+    pub flow: Option<FlowEdge>,
 }
 
 /// Paints the whole memory with `origin` as the top-left corner of the layout
@@ -49,6 +56,7 @@ pub fn draw_memory(painter: &Painter, origin: Pos2, input: &RenderInput<'_>) -> 
     canvas.draw_frames();
     canvas.draw_loans();
     canvas.draw_objects();
+    canvas.draw_flow();
     content_size(input.layout)
 }
 
@@ -169,17 +177,30 @@ impl Canvas<'_, '_> {
     }
 
     /// Bands go under the frames: they group rows without hiding them, and the
-    /// inner scope reads as an inset of the outer one.
+    /// inner scope reads as an inset of the outer one. The active block gets a
+    /// brighter outline, so the canvas shows where the flow is.
     fn draw_scopes(&self) {
         let palette = &self.input.theme.palette;
-        let fill = Color32::from_rgba_unmultiplied(
-            palette.frame_header.r(),
-            palette.frame_header.g(),
-            palette.frame_header.b(),
-            70,
-        );
-        let stroke = Stroke::new(1.0, palette.muted_text.gamma_multiply(0.7));
         for scope in &self.input.layout.scopes {
+            let active = self.input.active_scope == Some(scope.scope);
+            let fill = match active {
+                true => Color32::from_rgba_unmultiplied(
+                    palette.code_active_fill.r(),
+                    palette.code_active_fill.g(),
+                    palette.code_active_fill.b(),
+                    90,
+                ),
+                false => Color32::from_rgba_unmultiplied(
+                    palette.frame_header.r(),
+                    palette.frame_header.g(),
+                    palette.frame_header.b(),
+                    70,
+                ),
+            };
+            let stroke = match active {
+                true => Stroke::new(2.0, palette.code_active_stroke),
+                false => Stroke::new(1.0, palette.muted_text.gamma_multiply(0.7)),
+            };
             let rect = screen_rect(self.origin, scope.rect);
             self.painter.rect_filled(rect, BOX_CORNER, fill);
             self.painter
@@ -245,6 +266,7 @@ impl Canvas<'_, '_> {
     fn draw_frame(&self, frame: &FrameBox) {
         let palette = &self.input.theme.palette;
         let incident = frame_incident(self.input.state, frame.frame).is_some();
+        let active = !incident && self.input.active_frame == Some(frame.frame);
         let highlighted = !incident
             && (frame_touched(self.input.effects, frame.frame)
                 || dropped_in_frame(self.input.effects, frame.frame));
@@ -252,25 +274,30 @@ impl Canvas<'_, '_> {
             true => palette.alert_fill,
             false => palette.frame_fill,
         };
-        let stroke = outline(incident, highlighted, palette);
+        let stroke = frame_outline(incident, active, highlighted, palette);
         let rect = screen_rect(self.origin, frame.rect);
         let header = screen_rect(self.origin, frame.header);
         self.painter.rect_filled(rect, BOX_CORNER, fill);
         self.painter
             .rect_stroke(rect, BOX_CORNER, stroke, StrokeKind::Inside);
-        let header_fill = match (incident, highlighted) {
-            (true, _) => palette.alert_fill,
-            (false, true) => palette.effect_fill,
-            (false, false) => palette.frame_header,
+        let header_fill = match (incident, active, highlighted) {
+            (true, _, _) => palette.alert_fill,
+            (false, true, _) => palette.code_active_fill,
+            (false, false, true) => palette.effect_fill,
+            (false, false, false) => palette.frame_header,
         };
         self.painter.rect_filled(header, BOX_CORNER, header_fill);
-        let title_color = accent(
-            incident,
-            highlighted,
-            palette.title_text,
-            palette.alert_text,
-            palette.effect_text,
-        );
+        let title_color = match (incident, active) {
+            (true, _) => palette.alert_text,
+            (false, true) => palette.title_text,
+            (false, false) => accent(
+                incident,
+                highlighted,
+                palette.title_text,
+                palette.alert_text,
+                palette.effect_text,
+            ),
+        };
         self.draw_title(&self.frame_title(frame), header, title_color);
         for slot in &frame.slots {
             self.draw_slot(slot, palette.cell_fill, palette.text);
@@ -281,6 +308,57 @@ impl Canvas<'_, '_> {
         for object in &self.input.layout.objects {
             self.draw_object(object);
         }
+    }
+
+    /// Branch taken by a conditional jump, pinned next to the frame that ran it.
+    /// The event carries line numbers, not coordinates, so the chip states the
+    /// destination the same way the source panel does.
+    fn draw_flow(&self) {
+        let flow = match self.input.flow.as_ref() {
+            Some(flow) => flow,
+            None => return,
+        };
+        let frame = match self
+            .input
+            .active_frame
+            .and_then(|frame| self.input.layout.frame(frame))
+        {
+            Some(frame) => frame,
+            None => return,
+        };
+        let texts = &self.input.theme.texts;
+        let palette = &self.input.theme.palette;
+        let outcome = match flow.outcome {
+            crate::model::events::ConditionOutcome::True => "true",
+            crate::model::events::ConditionOutcome::False => "false",
+        };
+        let label = format!("{} {} ({})", texts.line_label, flow.to_line, outcome);
+        let frame_rect = screen_rect(self.origin, frame.rect);
+        let start = Pos2::new(frame_rect.right(), frame_rect.top() + 12.0);
+        let chip_origin = Pos2::new(start.x + 10.0, start.y - 10.0);
+        let width = label.chars().count() as f32 * 7.0 + 14.0;
+        let chip = EguiRect::from_min_size(chip_origin, Vec2::new(width, 20.0));
+        self.painter.arrow(
+            start,
+            Vec2::new(8.0, 0.0),
+            Stroke::new(ARROW_WIDTH, palette.code_active_stroke),
+        );
+        self.painter
+            .rect_filled(chip, CELL_CORNER, palette.effect_fill);
+        self.painter.rect_stroke(
+            chip,
+            CELL_CORNER,
+            Stroke::new(1.5, palette.effect_stroke),
+            StrokeKind::Inside,
+        );
+        let position = Pos2::new(chip.left() + TEXT_PAD, chip.center().y);
+        let _ = self.painter.text(
+            position,
+            Align2::LEFT_CENTER,
+            label,
+            FontId::monospace(CELL_FONT),
+            palette.effect_text,
+        );
     }
 
     fn draw_object(&self, object: &ObjectBox) {
@@ -464,6 +542,18 @@ fn object_header_fill(
         (false, true, _) => palette.effect_fill,
         (false, false, true) => palette.released_header,
         (false, false, false) => palette.object_header,
+    }
+}
+
+/// Incident wins over the active frame, which wins over the last effect: a red
+/// box is never turned amber or blue by a highlight, and the cursor always wins
+/// over a write that happened in the same step.
+fn frame_outline(incident: bool, active: bool, highlighted: bool, palette: &Palette) -> Stroke {
+    match (incident, active, highlighted) {
+        (true, _, _) => Stroke::new(2.0, palette.alert_stroke),
+        (false, true, _) => Stroke::new(2.5, palette.code_active_stroke),
+        (false, false, true) => Stroke::new(2.0, palette.effect_stroke),
+        (false, false, false) => Stroke::new(1.0, palette.stroke),
     }
 }
 

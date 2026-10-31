@@ -3,46 +3,155 @@
 ![Tests](https://github.com/muliz2243-prog/memory-visor/actions/workflows/rust.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-A time-travel debugger for Rust memory: lexical scopes, ownership, borrows and
-`Drop` are recorded as events and replayed on an `egui` canvas with a movable
-cursor.
+A visual data-flow and step-by-step execution viewer for a subset of Rust. It is
+designed to model the mental picture of variables, scopes and mutations through
+graphs of nodes that light up in real time: the running frame, the block it is
+inside, and the branch a conditional jump took.
 
-![Memory Visor showing two live borrows inside a block](docs/screenshot.png)
+![Memory Visor showing a running frame, its open scope and the data cells](docs/screenshot.png)
 
-Run the desktop window with `cargo run --bin visor`; `cargo run` starts the CLI.
-The Source panel opens in read-only mode and switches to a live editor with
-**Edit**: every keystroke is recorded, and **Open** loads a `.rs` file from disk.
-See `DESIGN.md` for the architecture and `AGENTS.md` for the verification
-commands.
+Run the desktop window with `cargo run --bin visor`; `cargo run` starts the
+terminal walkthrough. The window opens on a recorded sample, and the **Source**
+panel switches to a live editor with **Edit**: every keystroke is analysed and
+recorded, a failing construct is reported on its line, and **Open** loads a
+`.rs` file from disk.
+
+## What it supports today
+
+The recorder (`src/edge/recorder.rs`) is an interpreter, not a text patcher. It
+walks the supported subset and emits the same events the memory model already
+knows how to replay, so every step in the window exists for a reason.
+
+Supported:
+
+- `fn name(parameters) -> Type { ... }` with parameters, `return` and calls
+  between functions, including recursion (bounded by a depth limit).
+- `let name: Type = value;` and `let mut name: Type = value;` with an explicit
+  type and an initializer.
+- Assignments and compound assignments: `=`, `+=`, `-=`, `*=`, `/=`, `%=`.
+- Expressions with integer, float, boolean, character and string literals,
+  variables, function calls, unary `-` and `!`, `+ - * / %`, comparison
+  operators, `&&`, `||` and parentheses.
+- `if` / `else` blocks and plain nested `{ ... }` blocks, with return values
+  propagated out of a branch.
+- `println!`, `print!`, `eprintln!`, `eprint!` and `dbg!`: recognised and
+  skipped, because the canvas explains memory, not console output.
+- A buffer without `fn main` is executed as the body of an implicit `main`, so a
+  bare sequence of statements still records.
+
+Not supported yet; a program that uses them stops with a clear error naming the
+line instead of drawing a wrong trace:
+
+- loops (`loop`, `while`, `for`) and `match`;
+- structs, arrays and struct literals;
+- method calls (`value.method()`);
+- references and borrows (`&`, `&mut`) in the recorded source;
+- `else if` chains (nest the condition inside `else { ... }` instead);
+- shadowing: a second binding with the same name in the same frame;
+- more than one statement per line, and blocks that do not put
+  `} else {` on the closing line.
+
+The memory model itself (in `src/stages/apply.rs`) still understands ownership,
+borrows and `Drop`; the hand-written lifecycle sample exercises those events.
+The recorder currently produces only the subset above.
+
+## Architecture
+
+The project is split into three layers that only talk through data, so the
+interpreter and the drawing can grow independently.
+
+### 1. Analysis layer
+
+`src/stages/analyze.rs` scans the source into a `ProgramTree`: functions,
+parameters, local declarations, return types and call sites. It is deliberately
+shallow (one statement per line) and never guesses: a malformed header or an
+unknown type fails with a line number.
+
+### 2. Trace layer
+
+- `src/edge/recorder.rs` interprets the supported subset. Every statement
+  becomes a `TraceEvent`: a function call pushes a frame, `let` becomes
+  `DeclareVariable`, a mutation becomes `WriteMemory`, a block opens and closes
+  a scope, a conditional becomes `ConditionalJump`.
+- `src/stages/apply.rs` is the semantic engine. It validates each event against
+  the current `MemoryState` and either applies it or rejects it with an incident
+  pinned to the exact cell.
+- `src/stages/replay.rs` builds the `Timeline`: one `MemoryState` per event, plus
+  the effects and incidents of the step.
+- `src/stages/execution.rs` adds `ExecutionStep`, a read-only view over the
+  timeline and the events. It answers the three questions the canvas asks:
+  which node is active (`active_node`, resolved to a frame and a scope), which
+  source line is running, and where a `ConditionalJump` sent the flow
+  (`FlowEdge { from_line, to_line, outcome }`).
+- `src/edge/player.rs` owns time: play, pause, next, previous and the tick
+  accumulator used by the toolbar.
+
+### 3. Visual layer
+
+- `src/stages/layout.rs` computes pure geometry: frame boxes, heap object boxes,
+  scope bands, slots and reference connectors, with no `egui` types.
+- `src/shell/render.rs` paints that geometry. A frame box is outlined in blue
+  while it is the active node, the innermost open scope gets a brighter band,
+  and the branch of a conditional jump is drawn as a chip next to the frame.
+  Incidents always win over the active highlight, so a failure is never hidden.
+- `src/edge/ui/` holds the panels and controls: the source view and editor
+  (`code.rs`), the event list (`trace.rs`), the toolbar and the window itself
+  (`app.rs`).
+
+The CLI in `src/main.rs` reuses the same trace and layout stages to print the
+memory state and the computed geometry as text, which keeps both consumers
+honest about the same model.
 
 ## Build and run
 
 ```bash
 cargo build --release
 cargo test --all-targets
-cargo run              # CLI walkthrough
-cargo run --bin visor  # desktop window
+cargo run               # terminal walkthrough
+cargo run --bin visor   # desktop window
 ```
 
-## 🏗️ Architecture & Multi-Language Extensibility
+The window starts on `LIFECYCLE_SOURCE` from `src/edge/sample.rs`; the recorded
+events come from `src/edge/recorder.rs`. The CLI still uses the hand-written
+`SAMPLE_SOURCE` trace that exercises the borrow and ownership events, so both
+paths of the trace engine stay covered.
 
-The current version implements Rust's memory model strictly (LIFO scopes, `Drop`
-destructors and a borrow-checker simulation), but the project is built on a
-decoupled, layered architecture:
+## Contributing
 
-- **Presentation and History layer (`egui` / `history.rs`):** language-agnostic.
-  It only computes the geometry of scopes and references and drives time-travel
-  playback over a tape of events.
-- **Semantic engine (`apply.rs`):** owns the validation rules for memory and
-  lifetime semantics.
+### Extending the interpreter
 
-### Future extensions
+1. Add the construct to the analyzer only if the static tree needs to know it;
+   otherwise keep it in the recorder.
+2. Handle it in `src/edge/recorder.rs` and emit the model events that already
+   exist. If no event describes it, add one in `src/model/events.rs` and teach
+   `src/stages/apply.rs` how to apply or reject it.
+3. If it is unsupported, return a `RecordError` with the source line. Silence is
+   a bug: the window must never pretend a statement ran.
+4. Add a test in the recorder module that checks the resulting memory through
+   `build_timeline`, and one in `src/stages/execution.rs` when the construct
+   affects the active node or the flow.
 
-The layering allows extending the visualizer to other languages (such as
-Python, C++ or JavaScript) by abstracting the semantic engine behind an adapter
-trait (`LanguageSemantics`). That adapter would interpret language-specific
-memory events (for example garbage collection or reference counting) while
-reusing the same visual and playback engine.
+### Extending the graphical nodes
+
+1. Compute the geometry in `src/stages/layout.rs`; keep `egui` out of it.
+2. Paint it in `src/shell/render.rs`. Use the existing `Palette` roles
+   (`effect_*` for a step's effect, `code_active_*` for the cursor,
+   `alert_*` for incidents) so the visual language stays consistent.
+3. If a new kind of node can be active, extend `ExecutionNode` in
+   `src/stages/execution.rs` and resolve it in `ExecutionStep`.
+4. Add a layout test for the geometry and, when possible, a pure test for the
+   colour precedence in `render.rs`.
+
+### Before opening a pull request
+
+```bash
+cargo fmt --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+```
+
+The UI text lives in `src/shell/theme.rs`; keep it in English, and update
+`DESIGN.md` when the architecture or the supported subset changes.
 
 ## License
 

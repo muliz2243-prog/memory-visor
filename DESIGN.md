@@ -219,10 +219,10 @@ The UI paints the incident at its `Location`:
     cargo clippy --all-targets -- -D warnings
     cargo test --all-targets
 
-134 tests: 115 unit tests (analyzer, recorder, scope registry, history, reducer
-lifecycle, layout, format, narrative, theme, render, window, code, trace,
-replay, player, sample scenes), 13 reducer-tape integration tests and 6
-full-trace tests of the demo program.
+147 tests: 128 unit tests (analyzer, recorder, execution, scope registry,
+history, reducer lifecycle, layout, format, narrative, theme, render, window,
+code, trace, replay, player, sample scenes), 13 reducer-tape integration tests
+and 6 full-trace tests of the demo program.
 
 ## 11. Geometry (`stages/layout.rs`)
 
@@ -349,17 +349,13 @@ Drawing rules:
   swaps the program, the events and the `Timeline`, resets the player to 0 and
   rebuilds the geometry; on failure it keeps the previous trace and cursor and
   stores the `RecordError`, which the header shows as `line n: detail` in red;
-- the recorder is deliberately permissive. It runs `main` wherever it appears,
-  skips the bodies of every other `fn` and every `struct`, ignores braces it
-  cannot model by opening and closing anonymous scopes, drops statements that
-  are not memory events (`return`, calls, assignments), and skips a `let` whose
-  initializer cannot be reduced instead of rejecting the whole buffer. A buffer
-  without `fn main` is validated and recorded as the body of an implicit `main`,
-  so a bare sequence of `let` bindings still produces a trace. Typed `let`
-  bindings
-  with literal or arithmetic initializers and nested `{}` blocks are what it
-  records; it never invents a borrow, so the demo tape keeps the hand-written
-  loans;
+- the recorder is an interpreter for a strict subset. It runs `main` wherever
+  it appears (or the whole buffer as an implicit `main`), walks functions,
+  typed `let`/`let mut` bindings, assignments, calls and `if`/`else` blocks, and
+  returns a `RecordError` naming the line for anything it cannot execute
+  (`loop`, `match`, structs, arrays, method calls, borrows, `else if`,
+  shadowing). It never invents a borrow, so the demo tape keeps the
+  hand-written loans;
 - the trace panel (`trace.rs`) lists one row per event: sequence, narration and
   effects (or the rejection reason). The row of the applied step is selected and
   rejected rows are painted red. A click emits `UiMessage::SetStep(i + 1)`; the
@@ -386,9 +382,8 @@ overrides an incident. No window and no real time are needed.
 ## 14. Pending
 
 - playback speed (`Player::step_ms`) and transport keys;
-- a recorder that emits `EnterScope`, `Borrow`, `ReleaseBorrow`, `Move` and
-  `Drop` from real source (today it records `main` in any position — or the
-  whole buffer as an implicit `main` — with typed `let` bindings and blocks,
-  but still derives loans from the hand-written tape);
+- a recorder that emits `Borrow`, `ReleaseBorrow`, `Move` and `Drop` from real
+  source (today it records frames, scopes, mutations and conditionals, but
+  still derives loans from the hand-written tape);
 - highlighting the dropped path by name in the trace panel, not only on the
   canvas.
