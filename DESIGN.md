@@ -351,10 +351,12 @@ Drawing rules:
   stores the `RecordError`, which the header shows as `line n: detail` in red;
 - the recorder is deliberately permissive. It runs `main` wherever it appears,
   skips the bodies of every other `fn` and every `struct`, ignores braces it
-  cannot model by opening and closing anonymous scopes, and drops statements
-  that are not memory events (`return`, calls, assignments). A buffer without
-  `fn main` is validated and recorded as the body of an implicit `main`, so a
-  bare sequence of `let` bindings still produces a trace. Typed `let` bindings
+  cannot model by opening and closing anonymous scopes, drops statements that
+  are not memory events (`return`, calls, assignments), and skips a `let` whose
+  initializer cannot be reduced instead of rejecting the whole buffer. A buffer
+  without `fn main` is validated and recorded as the body of an implicit `main`,
+  so a bare sequence of `let` bindings still produces a trace. Typed `let`
+  bindings
   with literal or arithmetic initializers and nested `{}` blocks are what it
   records; it never invents a borrow, so the demo tape keeps the hand-written
   loans;

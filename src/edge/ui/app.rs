@@ -623,19 +623,19 @@ mod tests {
         let mut app = app();
         let length = app.timeline.len();
         app.set_step(2);
-        app.source = "fn main() {\n    let a: i32 = ;\n}".to_string();
+        app.source = "fn main() {\n    let a: i32 = 1;\n".to_string();
         app.update(UiMessage::Record);
         assert_eq!(app.timeline.len(), length, "the old trace stays");
         assert_eq!(app.step(), 2, "the cursor stays");
         let error = app.error.as_ref().expect("the failure must be kept");
-        assert_eq!(error.line, 2);
-        assert!(app.error_text().expect("text").starts_with("line 2: "));
+        assert_eq!(error.line, 1);
+        assert!(app.error_text().expect("text").starts_with("line 1: "));
     }
 
     #[test]
     fn a_successful_recording_clears_the_error() {
         let mut app = app();
-        app.source = "fn main() {\n    let a: i32 = ;\n}".to_string();
+        app.source = "fn main() {\n    let a: i32 = 1;\n".to_string();
         app.update(UiMessage::Record);
         assert!(app.error.is_some());
         app.source = "fn main() {\n    let a: i32 = -2 * 3;\n}".to_string();

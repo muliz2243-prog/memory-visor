@@ -135,7 +135,8 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         if let Some(rest) = text.strip_prefix("let ") {
-            return self.declare(number, rest);
+            self.declare(number, rest);
+            return Ok(());
         }
         self.walk_braces(number, opens, closes);
         Ok(())
@@ -203,24 +204,29 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn declare(&mut self, number: u32, rest: &str) -> Result<(), RecordError> {
+    /// Records a binding when its initializer can be evaluated. Anything the
+    /// evaluator cannot reduce (a call, a struct literal, a missing initializer)
+    /// is skipped instead of rejecting the whole buffer: the rest of the trace
+    /// stays useful while the line is still being typed.
+    fn declare(&mut self, number: u32, rest: &str) {
         if self.scopes.is_empty() {
-            return Err(RecordError::new(number, "a binding needs an open scope"));
+            return;
         }
         let statement = rest.trim_end().trim_end_matches(';');
-        let (name, value) = statement
-            .split_once(':')
-            .ok_or_else(|| RecordError::new(number, "expected `let name: Type = value;`"))?;
-        let name = name.trim();
-        let (_, expression) = value
-            .split_once('=')
-            .ok_or_else(|| RecordError::new(number, "the binding needs an initializer"))?;
-        let declaration = self
-            .program
-            .find_declaration(self.main, name)
-            .ok_or_else(|| RecordError::new(number, "unknown declaration"))?;
-        let value = evaluate(&declaration.data_type, expression.trim(), &self.variables)
-            .ok_or_else(|| RecordError::new(number, "only literals and arithmetic are recorded"))?;
+        let Some((name, value)) = statement.split_once(':') else {
+            return;
+        };
+        let name = name.trim().trim_start_matches("mut ").trim();
+        let Some((_, expression)) = value.split_once('=') else {
+            return;
+        };
+        let Some(declaration) = self.program.find_declaration(self.main, name) else {
+            return;
+        };
+        let Some(value) = evaluate(&declaration.data_type, expression.trim(), &self.variables)
+        else {
+            return;
+        };
         let sequence = self.next_sequence();
         self.push(TraceEvent::DeclareVariable {
             sequence,
@@ -233,7 +239,6 @@ impl<'a> Builder<'a> {
             value,
             depth: self.scopes.len(),
         });
-        Ok(())
     }
 
     /// Closes whatever the synthetic `main` left open: the buffer is a body,
@@ -651,8 +656,18 @@ mod tests {
     }
 
     #[test]
-    fn a_binding_that_cannot_be_evaluated_reports_its_line() {
-        let error = record("let a: i32 = ;").expect_err("an empty initializer must fail");
-        assert_eq!(error.line, 1);
+    fn a_binding_that_cannot_be_evaluated_is_skipped() {
+        let recording = record("let a: i32 = ;\nlet b: i32 = 2;")
+            .expect("an unreadable initializer must not block the trace");
+        assert!(
+            !recording.events.iter().any(
+                |event| matches!(event, TraceEvent::DeclareVariable { name, .. } if name == "a")
+            ),
+            "the unreadable binding records nothing"
+        );
+        assert_eq!(
+            declaration_value(&recording, "b"),
+            PrimitiveValue::Integer(2)
+        );
     }
 }
