@@ -10,6 +10,8 @@ cursor.
 ![Memory Visor showing two live borrows inside a block](docs/screenshot.png)
 
 Run the desktop window with `cargo run --bin visor`; `cargo run` starts the CLI.
+The Source panel opens in read-only mode and switches to a live editor with
+**Edit**: every keystroke is recorded, and **Open** loads a `.rs` file from disk.
 See `DESIGN.md` for the architecture and `AGENTS.md` for the verification
 commands.
 

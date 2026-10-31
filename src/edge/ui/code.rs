@@ -1,4 +1,6 @@
-use egui::{Align, Align2, Color32, CursorIcon, FontId, Pos2, Rect, ScrollArea, Sense, Ui, Vec2};
+use egui::{
+    Align, Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, ScrollArea, Sense, Ui, Vec2,
+};
 
 use crate::edge::ui::message::UiMessage;
 use crate::model::events::TraceEvent;
@@ -21,13 +23,16 @@ pub struct LineAnchor {
 }
 
 pub struct CodePanelInput<'a> {
-    pub source: &'a str,
     pub events: &'a [TraceEvent],
     pub program: &'a ProgramTree,
     pub active_line: Option<u32>,
     pub theme: &'a Theme,
     /// Ask the scroll area to follow the active row in this frame.
     pub follow: bool,
+    /// The editor replaces the highlighted rows while this is set.
+    pub editing: bool,
+    /// Last recording error, already formatted for the header.
+    pub error: Option<&'a str>,
 }
 
 /// Line the trace is on after `step` events. `0` is before the first event.
@@ -113,30 +118,86 @@ pub fn step_for_line(anchors: &[LineAnchor], line: u32) -> Option<usize> {
         .or_else(|| anchors.first().map(|anchor| anchor.step))
 }
 
-pub fn code_panel(ui: &mut Ui, input: &CodePanelInput<'_>) -> Option<UiMessage> {
+pub fn code_panel(
+    ui: &mut Ui,
+    input: &CodePanelInput<'_>,
+    draft: &mut String,
+) -> Option<UiMessage> {
+    let mut message = header(ui, input);
+    ui.separator();
+    match input.editing {
+        true => editor(ui, draft, &mut message),
+        false => lines(ui, input, draft, &mut message),
+    }
+    message
+}
+
+/// Title, mode switch and the two recording actions.
+fn header(ui: &mut Ui, input: &CodePanelInput<'_>) -> Option<UiMessage> {
+    let texts = &input.theme.texts;
     let mut message = None;
-    ui.heading(&input.theme.texts.code_title);
-    let hint = egui::RichText::new(&input.theme.texts.code_hint)
+    ui.horizontal_wrapped(|ui| {
+        ui.heading(&texts.code_title);
+        let toggle = match input.editing {
+            true => &texts.view_label,
+            false => &texts.edit_label,
+        };
+        if ui.button(toggle).clicked() {
+            message = Some(UiMessage::ToggleEdit);
+        }
+        if ui.button(&texts.run_label).clicked() {
+            message = Some(UiMessage::Record);
+        }
+        if ui.button(&texts.open_label).clicked() {
+            message = Some(UiMessage::OpenFile);
+        }
+    });
+    let hint = match input.editing {
+        true => &texts.recorded_label,
+        false => &texts.code_hint,
+    };
+    let hint = RichText::new(hint)
         .small()
         .color(input.theme.palette.muted_text);
     ui.label(hint);
-    ui.separator();
+    if let Some(error) = input.error {
+        ui.colored_label(input.theme.palette.alert_stroke, error);
+    }
+    message
+}
+
+fn lines(ui: &mut Ui, input: &CodePanelInput<'_>, draft: &str, message: &mut Option<UiMessage>) {
     let anchors = line_anchors(input.events, input.program);
-    let digits = input.source.lines().count().to_string().len();
+    let digits = draft.lines().count().to_string().len();
     ScrollArea::vertical()
         .id_salt("code_lines")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (index, text) in input.source.lines().enumerate() {
+            for (index, text) in draft.lines().enumerate() {
                 let number = index as u32 + 1;
                 let step = step_for_line(&anchors, number);
                 if let Some(clicked) = source_row(ui, input, number, text, digits, step) {
-                    message = Some(clicked);
+                    *message = Some(clicked);
                 }
             }
         });
-    message
+}
+
+fn editor(ui: &mut Ui, draft: &mut String, message: &mut Option<UiMessage>) {
+    let rows = draft.lines().count().max(16);
+    ScrollArea::vertical()
+        .id_salt("code_editor")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let edit = egui::TextEdit::multiline(draft)
+                .code_editor()
+                .desired_width(f32::INFINITY)
+                .desired_rows(rows);
+            if ui.add(edit).changed() {
+                *message = Some(UiMessage::Record);
+            }
+        });
 }
 
 fn source_row(

@@ -219,10 +219,10 @@ The UI paints the incident at its `Location`:
     cargo clippy --all-targets -- -D warnings
     cargo test --all-targets
 
-122 tests: 103 unit tests (analyzer, scope registry, history, reducer lifecycle,
-layout, format, narrative, theme, render, window, code, trace, replay, player,
-sample scenes), 13 reducer-tape integration tests and 6 full-trace tests of the
-demo program.
+131 tests: 112 unit tests (analyzer, recorder, scope registry, history, reducer
+lifecycle, layout, format, narrative, theme, render, window, code, trace,
+replay, player, sample scenes), 13 reducer-tape integration tests and 6
+full-trace tests of the demo program.
 
 ## 11. Geometry (`stages/layout.rs`)
 
@@ -301,7 +301,8 @@ Drawing rules:
 
 `VisorApp` implements `eframe::App` and takes no memory decisions:
 
-- it holds the source (`&'static str`), the `ProgramTree`, the `TraceEvent`s,
+- it holds the source (`String`, editable in the window), the `ProgramTree`,
+  the `TraceEvent`s,
   the `Timeline` built from them, the `Theme`, the `LayoutConfig`, the current
   `MemoryLayout` and a `Player`. The cursor is `player.index`: there is no
   parallel `step` that could drift;
@@ -336,6 +337,17 @@ Drawing rules:
   first step. Any line is clickable;
 - a click on the code emits `UiMessage::SetStep`, same as the trace. No panel
   knows the other: both speak the same message bus;
+- the source header carries `Edit`/`View`, `Run` and `Open`. In edit mode the
+  rows are replaced by a `TextEdit::multiline` bound to the same buffer; every
+  change emits `UiMessage::Record`, so the trace follows the typing. `Open`
+  asks `rfd` for a `.rs` file, loads it with `fs::read_to_string` and records it;
+- `apply_source` calls `edge::recorder::record` on the buffer. On success it
+  swaps the program, the events and the `Timeline`, resets the player to 0 and
+  rebuilds the geometry; on failure it keeps the previous trace and cursor and
+  stores the `RecordError`, which the header shows as `line n: detail` in red.
+  The recorder covers one `main`, typed `let` bindings with literal or
+  arithmetic initializers and nested `{}` blocks, so it never invents a borrow;
+  the demo tape keeps the hand-written loans;
 - the trace panel (`trace.rs`) lists one row per event: sequence, narration and
   effects (or the rejection reason). The row of the applied step is selected and
   rejected rows are painted red. A click emits `UiMessage::SetStep(i + 1)`; the
@@ -363,6 +375,7 @@ overrides an incident. No window and no real time are needed.
 
 - playback speed (`Player::step_ms`) and transport keys;
 - a recorder that emits `EnterScope`, `Borrow`, `ReleaseBorrow`, `Move` and
-  `Drop` from real source, replacing the hand-written lifecycle tape;
+  `Drop` from real source, replacing the hand-written lifecycle tape (today it
+  only records `main`, typed `let` bindings and `{}` blocks);
 - highlighting the dropped path by name in the trace panel, not only on the
   canvas.

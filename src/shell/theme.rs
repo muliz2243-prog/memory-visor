@@ -78,6 +78,10 @@ pub struct Texts {
     pub start_label: String,
     pub code_title: String,
     pub code_hint: String,
+    pub run_label: String,
+    pub open_label: String,
+    pub edit_label: String,
+    pub view_label: String,
     pub recorded_label: String,
 }
 
@@ -101,6 +105,10 @@ impl Texts {
             start_label: "start".to_string(),
             code_title: "Source".to_string(),
             code_hint: "click a line to jump".to_string(),
+            run_label: "Run".to_string(),
+            open_label: "Open".to_string(),
+            edit_label: "Edit".to_string(),
+            view_label: "View".to_string(),
             recorded_label: "Recorded".to_string(),
         }
     }
@@ -170,6 +178,10 @@ mod tests {
             &english.start_label,
             &english.code_title,
             &english.code_hint,
+            &english.run_label,
+            &english.open_label,
+            &english.edit_label,
+            &english.view_label,
             &english.recorded_label,
         ] {
             assert!(!text.is_empty());

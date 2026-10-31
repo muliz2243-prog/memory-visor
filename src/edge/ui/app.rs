@@ -3,6 +3,7 @@ use std::time::Duration;
 use egui::Sense;
 
 use crate::edge::player::{Player, PlayerPlan, Tick};
+use crate::edge::recorder::{RecordError, record};
 use crate::edge::sample::{LIFECYCLE_SOURCE, lifecycle_trace};
 use crate::edge::ui::code::{CodePanelInput, active_line, code_panel};
 use crate::edge::ui::message::UiMessage;
@@ -27,7 +28,7 @@ const INCIDENT_CHARS: usize = 120;
 const FRAME_MS: u64 = 50;
 
 pub struct VisorApp {
-    source: &'static str,
+    source: String,
     program: ProgramTree,
     events: Vec<TraceEvent>,
     timeline: Timeline,
@@ -35,17 +36,21 @@ pub struct VisorApp {
     config: LayoutConfig,
     layout: MemoryLayout,
     player: Player,
+    /// The source panel shows the editor instead of the highlighted rows.
+    editing: bool,
+    /// Last recording failure, kept while the previous trace stays on screen.
+    error: Option<RecordError>,
     /// Ask the code and trace panels to scroll to the cursor on this frame.
     /// Set when the cursor moves and taken once, before drawing the panels.
     follow_cursor: bool,
 }
 
 impl VisorApp {
-    pub fn new(program: ProgramTree, events: Vec<TraceEvent>, source: &'static str) -> Self {
+    pub fn new(program: ProgramTree, events: Vec<TraceEvent>, source: &str) -> Self {
         let config = LayoutConfig::default();
         let timeline = build_timeline(&program, &events);
         let mut app = VisorApp {
-            source,
+            source: source.to_string(),
             program,
             events,
             timeline,
@@ -53,6 +58,8 @@ impl VisorApp {
             config,
             layout: layout_memory(&MemoryState::empty(), &config),
             player: Player::new(),
+            editing: false,
+            error: None,
             follow_cursor: false,
         };
         app.rebuild_layout();
@@ -67,7 +74,60 @@ impl VisorApp {
             UiMessage::SetStep(step) => self.set_step(step),
             UiMessage::TogglePlay => self.toggle_play(),
             UiMessage::Tick(tick) => self.tick(tick),
+            UiMessage::ToggleEdit => self.editing = !self.editing,
+            UiMessage::Record => {
+                self.apply_source();
+            }
+            UiMessage::OpenFile => self.open_file(),
         }
+    }
+
+    /// Records the buffer. On success the window replays the new trace from the
+    /// start; on failure the previous trace and cursor stay untouched.
+    pub fn apply_source(&mut self) {
+        match record(&self.source) {
+            Ok(recording) => {
+                self.program = recording.program;
+                self.events = recording.events;
+                self.timeline = build_timeline(&self.program, &self.events);
+                self.player = Player::new();
+                self.error = None;
+                self.follow_cursor = false;
+                self.rebuild_layout();
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn open_file(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .add_filter("Rust", &["rs"])
+            .pick_file();
+        let path = match picked {
+            Some(path) => path,
+            None => return,
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(source) => {
+                self.source = source;
+                self.editing = true;
+                self.apply_source();
+            }
+            Err(error) => {
+                self.error = Some(RecordError::new(
+                    0,
+                    format!("cannot read {}: {}", path.display(), error),
+                ));
+            }
+        }
+    }
+
+    /// One line for the source header: the line only when the error has one.
+    fn error_text(&self) -> Option<String> {
+        self.error.as_ref().map(|error| match error.line {
+            0 => error.detail.clone(),
+            line => format!("line {}: {}", line, error.detail),
+        })
     }
 
     /// Moves the cursor and recomputes the geometry for the new snapshot.
@@ -227,16 +287,18 @@ impl VisorApp {
     }
 
     fn code(&mut self, ui: &mut egui::Ui, follow: bool) {
+        let error = self.error_text();
         let message = {
             let input = CodePanelInput {
-                source: self.source,
                 events: &self.events,
                 program: &self.program,
                 active_line: self.active_source_line(),
                 theme: &self.theme,
                 follow,
+                editing: self.editing,
+                error: error.as_deref(),
             };
-            code_panel(ui, &input)
+            code_panel(ui, &input, &mut self.source)
         };
         if let Some(message) = message {
             self.update(message);
@@ -509,5 +571,55 @@ mod tests {
         app.update(UiMessage::TogglePlay);
         assert_eq!(app.step(), 0);
         assert!(app.playing());
+    }
+
+    #[test]
+    fn editing_is_a_switch() {
+        let mut app = app();
+        assert!(!app.editing);
+        app.update(UiMessage::ToggleEdit);
+        assert!(app.editing);
+        app.update(UiMessage::ToggleEdit);
+        assert!(!app.editing);
+    }
+
+    #[test]
+    fn recording_new_source_replaces_the_trace() {
+        let mut app = app();
+        app.update(UiMessage::SetStep(4));
+        app.source = "fn main() {\n    let a: i32 = 1;\n}".to_string();
+        app.update(UiMessage::Record);
+        assert_eq!(app.step(), 0, "a new recording starts at the beginning");
+        assert!(app.error.is_none());
+        assert_eq!(app.active_source_line(), None);
+        assert_eq!(app.timeline.len(), 5, "start, scope, declare, exit, end");
+        app.set_step(3);
+        assert_eq!(app.active_source_line(), Some(2));
+        assert_eq!(app.layout().frames.len(), 1, "the scalar lives in main");
+    }
+
+    #[test]
+    fn a_broken_source_keeps_the_previous_trace_and_reports_the_line() {
+        let mut app = app();
+        let length = app.timeline.len();
+        app.set_step(2);
+        app.source = "fn main() {\n    let a: i32 = ;\n}".to_string();
+        app.update(UiMessage::Record);
+        assert_eq!(app.timeline.len(), length, "the old trace stays");
+        assert_eq!(app.step(), 2, "the cursor stays");
+        let error = app.error.as_ref().expect("the failure must be kept");
+        assert_eq!(error.line, 2);
+        assert!(app.error_text().expect("text").starts_with("line 2: "));
+    }
+
+    #[test]
+    fn a_successful_recording_clears_the_error() {
+        let mut app = app();
+        app.source = "fn main() {\n    oops\n}".to_string();
+        app.update(UiMessage::Record);
+        assert!(app.error.is_some());
+        app.source = "fn main() {\n    let a: i32 = -2 * 3;\n}".to_string();
+        app.update(UiMessage::Record);
+        assert!(app.error.is_none());
     }
 }
