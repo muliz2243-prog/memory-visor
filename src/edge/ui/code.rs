@@ -33,6 +33,8 @@ pub struct CodePanelInput<'a> {
     pub editing: bool,
     /// Last recording error, already formatted for the header.
     pub error: Option<&'a str>,
+    /// Focus the editor on this frame, right after `Edit` is pressed.
+    pub focus: bool,
 }
 
 /// Line the trace is on after `step` events. `0` is before the first event.
@@ -126,7 +128,7 @@ pub fn code_panel(
     let mut message = header(ui, input);
     ui.separator();
     match input.editing {
-        true => editor(ui, draft, &mut message),
+        true => editor(ui, draft, input.focus, &mut message),
         false => lines(ui, input, draft, &mut message),
     }
     message
@@ -184,17 +186,23 @@ fn lines(ui: &mut Ui, input: &CodePanelInput<'_>, draft: &str, message: &mut Opt
         });
 }
 
-fn editor(ui: &mut Ui, draft: &mut String, message: &mut Option<UiMessage>) {
+fn editor(ui: &mut Ui, draft: &mut String, focus: bool, message: &mut Option<UiMessage>) {
     let rows = draft.lines().count().max(16);
     ScrollArea::vertical()
         .id_salt("code_editor")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let id = ui.make_persistent_id("source_editor");
             let edit = egui::TextEdit::multiline(draft)
+                .id(id)
                 .code_editor()
                 .desired_width(f32::INFINITY)
                 .desired_rows(rows);
-            if ui.add(edit).changed() {
+            let response = ui.add(edit);
+            if focus {
+                response.request_focus();
+            }
+            if response.changed() {
                 *message = Some(UiMessage::Record);
             }
         });

@@ -40,6 +40,8 @@ pub struct VisorApp {
     editing: bool,
     /// Last recording failure, kept while the previous trace stays on screen.
     error: Option<RecordError>,
+    /// Focus the editor on the next frame after `Edit` is pressed.
+    focus_editor: bool,
     /// Ask the code and trace panels to scroll to the cursor on this frame.
     /// Set when the cursor moves and taken once, before drawing the panels.
     follow_cursor: bool,
@@ -60,6 +62,7 @@ impl VisorApp {
             player: Player::new(),
             editing: false,
             error: None,
+            focus_editor: false,
             follow_cursor: false,
         };
         app.rebuild_layout();
@@ -74,7 +77,10 @@ impl VisorApp {
             UiMessage::SetStep(step) => self.set_step(step),
             UiMessage::TogglePlay => self.toggle_play(),
             UiMessage::Tick(tick) => self.tick(tick),
-            UiMessage::ToggleEdit => self.editing = !self.editing,
+            UiMessage::ToggleEdit => {
+                self.editing = !self.editing;
+                self.focus_editor = self.editing;
+            }
             UiMessage::Record => {
                 self.apply_source();
             }
@@ -297,9 +303,11 @@ impl VisorApp {
                 follow,
                 editing: self.editing,
                 error: error.as_deref(),
+                focus: self.focus_editor,
             };
             code_panel(ui, &input, &mut self.source)
         };
+        self.focus_editor = false;
         if let Some(message) = message {
             self.update(message);
             ui.ctx().request_repaint();
@@ -584,6 +592,18 @@ mod tests {
     }
 
     #[test]
+    fn editing_requests_focus_once() {
+        let mut app = app();
+        assert!(!app.focus_editor);
+        app.update(UiMessage::ToggleEdit);
+        assert!(app.focus_editor, "entering the editor asks for focus");
+        app.focus_editor = false;
+        app.update(UiMessage::ToggleEdit);
+        assert!(!app.editing);
+        assert!(!app.focus_editor, "going back to the view does not focus");
+    }
+
+    #[test]
     fn recording_new_source_replaces_the_trace() {
         let mut app = app();
         app.update(UiMessage::SetStep(4));
@@ -615,7 +635,7 @@ mod tests {
     #[test]
     fn a_successful_recording_clears_the_error() {
         let mut app = app();
-        app.source = "fn main() {\n    oops\n}".to_string();
+        app.source = "fn main() {\n    let a: i32 = ;\n}".to_string();
         app.update(UiMessage::Record);
         assert!(app.error.is_some());
         app.source = "fn main() {\n    let a: i32 = -2 * 3;\n}".to_string();

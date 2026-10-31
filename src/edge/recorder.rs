@@ -38,28 +38,46 @@ impl RecordError {
 }
 
 pub fn record(source: &str) -> Result<Recording, RecordError> {
-    let program = match analyze_program(source) {
-        Analysis::Analyzed(program) => program,
-        Analysis::Failed(error) => return Err(RecordError::new(error.line, error.detail)),
-    };
+    match analyze_program(source) {
+        Analysis::Analyzed(program) => record_program(source, program),
+        Analysis::Failed(error) => {
+            if !error.detail.contains("missing 'main'") {
+                return Err(RecordError::new(error.line, error.detail));
+            }
+            // No `main`: the buffer itself is the body, so a bare sequence of
+            // statements still records instead of demanding a function header.
+            let wrapped = format!("fn main() {{\n{}\n}}", source);
+            match analyze_program(&wrapped) {
+                Analysis::Analyzed(program) => record_body(source, program),
+                Analysis::Failed(error) => Err(RecordError::new(error.line, error.detail)),
+            }
+        }
+    }
+}
+
+fn record_program(source: &str, program: ProgramTree) -> Result<Recording, RecordError> {
     let main = match program.function_named("main") {
         Some(main) => main,
         None => return Err(RecordError::new(1, "the program needs a main function")),
     };
-    let mut builder = Builder {
-        program: &program,
-        main,
-        events: Vec::new(),
-        sequence: 0,
-        scopes: Vec::new(),
-        next_scope: 1,
-        variables: Vec::new(),
-        started: false,
-        finished: false,
-    };
+    let mut builder = Builder::new(&program, main);
     for (index, raw) in source.lines().enumerate() {
         builder.line(index as u32 + 1, raw.trim())?;
     }
+    builder.finish()
+}
+
+fn record_body(source: &str, program: ProgramTree) -> Result<Recording, RecordError> {
+    let main = match program.function_named("main") {
+        Some(main) => main,
+        None => return Err(RecordError::new(1, "the program needs a main function")),
+    };
+    let mut builder = Builder::new(&program, main);
+    builder.start(1);
+    for (index, raw) in source.lines().enumerate() {
+        builder.line(index as u32 + 1, raw.trim())?;
+    }
+    builder.close_remaining();
     builder.finish()
 }
 
@@ -72,60 +90,90 @@ struct Builder<'a> {
     next_scope: u32,
     /// Values already declared, with the depth of the scope that owns them.
     variables: Vec<Binding>,
+    /// `main` has started.
     started: bool,
+    /// `main` has closed; anything after it is not part of the run.
     finished: bool,
+    /// Brace depth inside a struct or a function that is not `main`.
+    skip: i32,
 }
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
+    fn new(program: &'a ProgramTree, main: crate::model::ids::FunctionId) -> Self {
+        Builder {
+            program,
+            main,
+            events: Vec::new(),
+            sequence: 0,
+            scopes: Vec::new(),
+            next_scope: 1,
+            variables: Vec::new(),
+            started: false,
+            finished: false,
+            skip: 0,
+        }
+    }
+
     fn line(&mut self, number: u32, text: &str) -> Result<(), RecordError> {
         if text.is_empty() || text.starts_with("//") {
             return Ok(());
         }
+        let (opens, closes) = braces(text);
+        if self.skip > 0 {
+            self.skip = (self.skip + opens as i32 - closes as i32).max(0);
+            return Ok(());
+        }
         if text.starts_with("fn ") {
-            return self.start_function(number, text);
+            self.function_header(number, text, opens as i32 - closes as i32);
+            return Ok(());
         }
-        if text == "{" {
-            return self.open_block(number);
+        if text.starts_with("struct ") {
+            self.skip = (opens as i32 - closes as i32).max(0);
+            return Ok(());
         }
-        if text == "}" {
-            return self.close_scope(number);
+        if !self.started || self.finished {
+            return Ok(());
         }
         if let Some(rest) = text.strip_prefix("let ") {
             return self.declare(number, rest);
         }
-        Err(RecordError::new(
-            number,
-            "only `fn main`, typed `let` bindings and `{}` blocks are recorded",
-        ))
+        self.walk_braces(number, opens, closes);
+        Ok(())
     }
 
-    fn start_function(&mut self, number: u32, text: &str) -> Result<(), RecordError> {
-        if self.started {
-            return Err(RecordError::new(number, "only one function can run"));
+    /// Enters `main` when it appears, wherever it is; every other function body
+    /// is skipped so its braces never touch the recorded scopes.
+    fn function_header(&mut self, number: u32, text: &str, net: i32) {
+        if self.started || !text.starts_with("fn main(") {
+            self.skip = net.max(0);
+            return;
         }
-        if !text.starts_with("fn main(") {
-            return Err(RecordError::new(number, "only `main` can run"));
-        }
+        self.start(number);
+    }
+
+    fn start(&mut self, line: u32) {
         self.started = true;
         let function = self.main;
         let sequence = self.next_sequence();
         self.push(TraceEvent::StartFunction {
             sequence,
             function,
-            call_line: number,
+            call_line: line,
             arguments: Vec::new(),
         });
-        self.enter_scope(number, ScopeKind::Function)
+        self.enter_scope(line, ScopeKind::Function);
     }
 
-    fn open_block(&mut self, number: u32) -> Result<(), RecordError> {
-        if !self.started {
-            return Err(RecordError::new(number, "a block needs a running function"));
+    fn walk_braces(&mut self, number: u32, opens: usize, closes: usize) {
+        for _ in 0..closes {
+            self.close_scope();
         }
-        self.enter_scope(number, ScopeKind::Block)
+        for _ in 0..opens {
+            self.enter_scope(number, ScopeKind::Block);
+        }
     }
 
-    fn enter_scope(&mut self, number: u32, kind: ScopeKind) -> Result<(), RecordError> {
+    fn enter_scope(&mut self, number: u32, kind: ScopeKind) {
         let scope = ScopeId(self.next_scope);
         self.next_scope += 1;
         let parent = self.scopes.last().copied();
@@ -138,19 +186,21 @@ impl Builder<'_> {
             kind,
             parent,
         });
-        Ok(())
     }
 
-    fn close_scope(&mut self, number: u32) -> Result<(), RecordError> {
+    /// Closes the innermost scope; a stray `}` is ignored instead of rejected.
+    fn close_scope(&mut self) {
         let scope = match self.scopes.pop() {
             Some(scope) => scope,
-            None => return Err(RecordError::new(number, "unmatched `}`")),
+            None => return,
         };
         let sequence = self.next_sequence();
         self.push(TraceEvent::ExitScope { sequence, scope });
         let depth = self.scopes.len();
         self.variables.retain(|binding| binding.depth <= depth);
-        Ok(())
+        if self.scopes.is_empty() {
+            self.finished = true;
+        }
     }
 
     fn declare(&mut self, number: u32, rest: &str) -> Result<(), RecordError> {
@@ -186,6 +236,14 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// Closes whatever the synthetic `main` left open: the buffer is a body,
+    /// so its scopes end at the end of the file.
+    fn close_remaining(&mut self) {
+        while !self.scopes.is_empty() {
+            self.close_scope();
+        }
+    }
+
     fn finish(mut self) -> Result<Recording, RecordError> {
         if !self.started {
             return Err(RecordError::new(1, "the program needs a main function"));
@@ -194,14 +252,11 @@ impl Builder<'_> {
             let line = self.last_line();
             return Err(RecordError::new(line, "unclosed `{`"));
         }
-        if !self.finished {
-            self.finished = true;
-            let sequence = self.next_sequence();
-            self.push(TraceEvent::EndFunction {
-                sequence,
-                return_value: None,
-            });
-        }
+        let sequence = self.next_sequence();
+        self.push(TraceEvent::EndFunction {
+            sequence,
+            return_value: None,
+        });
         Ok(Recording {
             program: self.program.clone(),
             events: self.events,
@@ -272,6 +327,14 @@ fn character(text: &str) -> Option<char> {
         (Some(value), None) => Some(value),
         _ => None,
     }
+}
+
+/// Opening and closing braces in one line. String literals with braces are
+/// out of the recorded subset anyway, so counting characters is enough.
+fn braces(text: &str) -> (usize, usize) {
+    let opens = text.matches('{').count();
+    let closes = text.matches('}').count();
+    (opens, closes)
 }
 
 /// An integer that widens to a float only when a division leaves the integers.
@@ -537,10 +600,13 @@ mod tests {
     }
 
     #[test]
-    fn the_recorder_rejects_statements_outside_the_subset() {
-        let error = record("fn main() {\n let a: i32 = 1;\n println!(\"hi\");\n}")
-            .expect_err("calls are not recorded");
-        assert_eq!(error.line, 3);
+    fn statements_that_are_not_memory_events_are_ignored() {
+        let recording = record("fn main() {\n let a: i32 = 1;\n println!(\"hi\");\n}")
+            .expect("calls must not block the trace");
+        assert_eq!(
+            declaration_value(&recording, "a"),
+            PrimitiveValue::Integer(1)
+        );
     }
 
     #[test]
@@ -554,8 +620,39 @@ mod tests {
     }
 
     #[test]
-    fn the_recorder_reports_a_missing_main() {
-        let error = record("fn other() {\n}").expect_err("main is required");
-        assert!(error.detail.contains("main"), "got {:?}", error.detail);
+    fn main_may_come_after_other_functions() {
+        let source =
+            "fn helper(x: i32) -> i32 {\n let y: i32 = x;\n}\nfn main() {\n let a: i32 = 2;\n}";
+        let recording = record(source).expect("main need not be first");
+        assert_eq!(
+            declaration_value(&recording, "a"),
+            PrimitiveValue::Integer(2)
+        );
+        assert!(
+            recording.events.iter().all(
+                |event| !matches!(event, TraceEvent::DeclareVariable { name, .. } if name == "y")
+            ),
+            "the helper body must not run"
+        );
+    }
+
+    #[test]
+    fn a_bare_sequence_of_statements_records_without_a_main() {
+        let recording = record("let a: i32 = 1;\nlet b: i32 = a + 2;")
+            .expect("top-level statements must record");
+        assert_eq!(
+            declaration_value(&recording, "b"),
+            PrimitiveValue::Integer(3)
+        );
+        assert!(matches!(
+            recording.events.first(),
+            Some(TraceEvent::StartFunction { .. })
+        ));
+    }
+
+    #[test]
+    fn a_binding_that_cannot_be_evaluated_reports_its_line() {
+        let error = record("let a: i32 = ;").expect_err("an empty initializer must fail");
+        assert_eq!(error.line, 1);
     }
 }

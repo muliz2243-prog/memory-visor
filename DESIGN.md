@@ -219,7 +219,7 @@ The UI paints the incident at its `Location`:
     cargo clippy --all-targets -- -D warnings
     cargo test --all-targets
 
-131 tests: 112 unit tests (analyzer, recorder, scope registry, history, reducer
+134 tests: 115 unit tests (analyzer, recorder, scope registry, history, reducer
 lifecycle, layout, format, narrative, theme, render, window, code, trace,
 replay, player, sample scenes), 13 reducer-tape integration tests and 6
 full-trace tests of the demo program.
@@ -339,15 +339,25 @@ Drawing rules:
   knows the other: both speak the same message bus;
 - the source header carries `Edit`/`View`, `Run` and `Open`. In edit mode the
   rows are replaced by a `TextEdit::multiline` bound to the same buffer; every
-  change emits `UiMessage::Record`, so the trace follows the typing. `Open`
+  change emits `UiMessage::Record`, so the trace follows the typing. The editor
+  keeps a stable widget id (`ui.make_persistent_id("source_editor")`), so the
+  focus survives the error label appearing and clipboard shortcuts reach the
+  widget; `ToggleEdit` sets `focus_editor`, which the next frame consumes with
+  `request_focus` and clears, so `Edit` puts the caret in the buffer. `Open`
   asks `rfd` for a `.rs` file, loads it with `fs::read_to_string` and records it;
 - `apply_source` calls `edge::recorder::record` on the buffer. On success it
   swaps the program, the events and the `Timeline`, resets the player to 0 and
   rebuilds the geometry; on failure it keeps the previous trace and cursor and
-  stores the `RecordError`, which the header shows as `line n: detail` in red.
-  The recorder covers one `main`, typed `let` bindings with literal or
-  arithmetic initializers and nested `{}` blocks, so it never invents a borrow;
-  the demo tape keeps the hand-written loans;
+  stores the `RecordError`, which the header shows as `line n: detail` in red;
+- the recorder is deliberately permissive. It runs `main` wherever it appears,
+  skips the bodies of every other `fn` and every `struct`, ignores braces it
+  cannot model by opening and closing anonymous scopes, and drops statements
+  that are not memory events (`return`, calls, assignments). A buffer without
+  `fn main` is validated and recorded as the body of an implicit `main`, so a
+  bare sequence of `let` bindings still produces a trace. Typed `let` bindings
+  with literal or arithmetic initializers and nested `{}` blocks are what it
+  records; it never invents a borrow, so the demo tape keeps the hand-written
+  loans;
 - the trace panel (`trace.rs`) lists one row per event: sequence, narration and
   effects (or the rejection reason). The row of the applied step is selected and
   rejected rows are painted red. A click emits `UiMessage::SetStep(i + 1)`; the
@@ -375,7 +385,8 @@ overrides an incident. No window and no real time are needed.
 
 - playback speed (`Player::step_ms`) and transport keys;
 - a recorder that emits `EnterScope`, `Borrow`, `ReleaseBorrow`, `Move` and
-  `Drop` from real source, replacing the hand-written lifecycle tape (today it
-  only records `main`, typed `let` bindings and `{}` blocks);
+  `Drop` from real source (today it records `main` in any position — or the
+  whole buffer as an implicit `main` — with typed `let` bindings and blocks,
+  but still derives loans from the hand-written tape);
 - highlighting the dropped path by name in the trace panel, not only on the
   canvas.
