@@ -11,10 +11,10 @@ inside, and the branch a conditional jump took.
 ![Memory Visor showing a running frame, its open scope and the data cells](docs/screenshot.png)
 
 Run the desktop window with `cargo run --bin visor`; `cargo run` starts the
-terminal walkthrough. The window opens on a recorded sample, and the **Source**
-panel switches to a live editor with **Edit**: every keystroke is analysed and
-recorded, a failing construct is reported on its line, and **Open** loads a
-`.rs` file from disk.
+terminal walkthrough. The window opens on a hand-authored demo tape that covers
+borrows and drops, then the **Source** panel switches to a live editor with
+**Edit**: every keystroke is analysed and recorded, a failing construct is
+reported on its line, and **Open** loads a `.rs` file from disk.
 
 ## What it supports today
 
@@ -55,6 +55,23 @@ The memory model itself (in `src/stages/apply.rs`) still understands ownership,
 borrows and `Drop`; the hand-written lifecycle sample exercises those events.
 The recorder currently produces only the subset above.
 
+## Beyond this subset
+
+The canvas does not know Rust: it paints `MemoryState`s and reads `TraceEvent`s.
+The coupling sits one level up — `apply` and `render` resolve names and types
+through `ProgramTree`, the Rust declaration catalog — so a second language needs
+its own parser/recorder plus that catalog, not a rewrite of the window.
+
+`DESIGN.md` §15 lists the four steps that turn this into a contract instead of a
+coincidence: the function name inside `StartFunction`, a `ProgramModel` trait,
+a versioned JSON trace (`visor --trace`), and a written event contract. The same
+section records the other known limit: the timeline keeps one full snapshot per
+event, so scrubbing is O(1) but a trace of tens of thousands of events needs
+keyframes.
+
+None of that is implemented yet, and this README does not promise it. Today the
+recorder runs one language: the subset above.
+
 ## Architecture
 
 The project is split into three layers that only talk through data, so the
@@ -65,7 +82,9 @@ interpreter and the drawing can grow independently.
 `src/stages/analyze.rs` scans the source into a `ProgramTree`: functions,
 parameters, local declarations, return types and call sites. It is deliberately
 shallow (one statement per line) and never guesses: a malformed header or an
-unknown type fails with a line number.
+unknown type fails with a line number. `ProgramTree` is also the only
+Rust-shaped type the trace engine still reads; §15 explains how to remove that
+dependency.
 
 ### 2. Trace layer
 
@@ -111,10 +130,11 @@ cargo run               # terminal walkthrough
 cargo run --bin visor   # desktop window
 ```
 
-The window starts on `LIFECYCLE_SOURCE` from `src/edge/sample.rs`; the recorded
-events come from `src/edge/recorder.rs`. The CLI still uses the hand-written
-`SAMPLE_SOURCE` trace that exercises the borrow and ownership events, so both
-paths of the trace engine stay covered.
+The window starts on `LIFECYCLE_SOURCE` and runs the hand-authored
+`lifecycle_trace()` from `src/edge/sample.rs`, which exercises borrows and
+`Drop` events the recorder does not emit yet; editing the source switches to
+`record()` and the live subset. The CLI uses `SAMPLE_SOURCE`, a hand-written
+trace with structs and arrays, so both paths of the trace engine stay covered.
 
 ## Contributing
 
@@ -141,6 +161,13 @@ paths of the trace engine stay covered.
    `src/stages/execution.rs` and resolve it in `ExecutionStep`.
 4. Add a layout test for the geometry and, when possible, a pure test for the
    colour precedence in `render.rs`.
+
+### Adding another language
+
+Start with `DESIGN.md` §15. The target contract is a `TraceEvent` stream plus a
+`ProgramModel` catalog; until that trait exists, `apply` and `render` still need
+`ProgramTree`. Keep language-specific parsing in its own front-end and do not
+add language branches to the renderer.
 
 ### Before opening a pull request
 

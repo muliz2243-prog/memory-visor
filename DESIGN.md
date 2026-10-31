@@ -212,6 +212,13 @@ The UI paints the incident at its `Location`:
 7. **`Move` is stack-to-stack for now**. Partial heap moves would need a shape
    rule that the recorder does not emit yet; the reducer rejects them instead of
    inventing one.
+8. **One full snapshot per step**. `build_timeline` stores a `MemoryState` after
+   every event, so scrubbing is a `Vec` index but building costs O(n × live
+   state), and `incidents` is copied inside every snapshot. That is the right
+   trade for the traces this project produces (tens or hundreds of events, and
+   the window must feel immediate); it is not the right trade for tens of
+   thousands. The escape is written down in §15 and is not implemented until a
+   trace that needs it exists.
 
 ## 10. Verification
 
@@ -387,3 +394,57 @@ overrides an incident. No window and no real time are needed.
   still derives loans from the hand-written tape);
 - highlighting the dropped path by name in the trace panel, not only on the
   canvas.
+
+## 15. Extension points and known limits
+
+The pipeline is `source → ProgramTree → TraceEvent → Timeline → MemoryState →
+MemoryLayout → canvas`. Rust is the only front-end, and the core still reads the
+Rust catalog in two places, so "language-agnostic" is a direction, not a
+finished property. The four steps to get there, in order:
+
+1. **Name in the event, not the catalog.** `StartFunction` carries a
+   `FunctionId`, which `apply` and `render` resolve through `ProgramTree`.
+   Storing the function name in the event as well lets the renderer paint a
+   trace without any catalog; the catalog then becomes an optional validator.
+2. **`ProgramModel` trait.** Every front-end supplies functions, parameters,
+   declared types and struct shapes. `ProgramTree` becomes `RustProgram:
+   ProgramModel`, and `apply` stops naming a Rust AST. The boundary is: events
+   describe *what happened*, the model describes *what was declared*.
+3. **Versioned JSON trace.** `visor --trace file.json` plus a schema in
+   `docs/trace-format.md`. A short Python or JavaScript script should be able to
+   emit a valid trace without writing Rust or reading `apply.rs`. This is the
+   cheapest contribution path and the one that turns the project into a
+   protocol instead of an application.
+4. **Written event contract.** Ordering rules (`StartFunction` →
+   `EnterScope(Function)` → statements → `ExitScope` → `EndFunction`),
+   invariants (sequence numbers, frame ids, one scope stack) and the meaning of
+   each variant. Today they live implicitly in the recorder, so every
+   contributor rediscovers them by reading the code.
+
+### Timeline snapshots
+
+`Timeline::states` holds one full clone per event. Scrubbing is O(1) because the
+work happens up front: O(n × live state) time and memory. Strings dominate each
+clone (variable names, object labels, path segments) and `incidents` is copied
+with every snapshot, which makes a trace full of rejections quadratic.
+
+The first symptom is not an OOM: `apply_source` rebuilds the timeline on every
+keystroke, so a long trace shows up as typing latency before it shows up as
+memory.
+
+Two escapes, both compatible with `state_at(step)`:
+
+- **Keyframes every N events** (N ≈ 100–200): keep every Nth state and replay at
+  most N−1 events on demand. Memory O(n/N × state), lookup O(N), still
+  imperceptible.
+- **Persistent structures** (`im::Vector`, `Arc<str>`): snapshots share the
+  unchanged parts, so a step pays only for what it mutated. More invasive,
+  because `apply` mutates through ownership today.
+
+The cheap intermediate is `Arc<str>` for names and labels: ids are already
+`Copy`, and strings dominate the clone.
+
+None of this is implemented on purpose. A few hundred events do not need it, and
+the O(1) scrub is part of why the window feels immediate. The limit is written
+here so the next contributor can choose with the numbers in view instead of
+discovering them with a broken demo.
